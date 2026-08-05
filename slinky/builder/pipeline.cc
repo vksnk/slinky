@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <list>
 #include <map>
 #include <optional>
@@ -20,6 +21,7 @@
 #include "slinky/builder/simplify.h"
 #include "slinky/builder/slide_and_fold_storage.h"
 #include "slinky/builder/substitute.h"
+#include "slinky/runtime/buffer.h"
 #include "slinky/runtime/depends_on.h"
 #include "slinky/runtime/evaluate.h"
 #include "slinky/runtime/expr.h"
@@ -1529,6 +1531,92 @@ stmt inject_traces(const stmt& s, node_context& ctx) {
   return result;
 }
 
+// Computes the layout (strides and total size in bytes) of allocations at build time when it only depends on
+// constants: the elem_size, every dim's extent and fold factor, and any explicitly specified strides. `evaluate` then
+// skips `init_strides` for such allocations. The bounds do not need to be constant: the layout only depends on the
+// extents, so per-tile allocations inside loops (constant extent, loop-dependent bounds) fold too. This must run
+// after all other mutations of the pipeline: rebuilding an `allocate` drops the folded layout (see
+// `allocate::constant_size`).
+class allocation_layout_folder : public node_mutator {
+  index_t stride_alignment_;
+
+public:
+  allocation_layout_folder(index_t stride_alignment) : stride_alignment_(stride_alignment) {}
+
+  void visit(const allocate* op) override {
+    stmt body = mutate(op->body);
+
+    std::optional<index_t> elem_size = as_constant(op->elem_size);
+    std::vector<dim> layout(op->dims.size());
+    bool constant_layout = elem_size.has_value();
+    for (std::size_t d = 0; constant_layout && d < op->dims.size(); ++d) {
+      const dim_expr& op_d = op->dims[d];
+      dim& layout_d = layout[d];
+      index_t stride = dim::auto_stride;
+      if (op_d.stride.defined()) {
+        std::optional<index_t> stride_value = as_constant(op_d.stride);
+        if (!stride_value) {
+          constant_layout = false;
+          break;
+        }
+        stride = *stride_value;
+      }
+      if (stride == 0) {
+        // Broadcast dims don't contribute to the layout regardless of their bounds.
+        layout_d.set_bounds(0, 0);
+        layout_d.set_stride(0);
+        layout_d.set_fold_factor(dim::unfolded);
+        continue;
+      }
+      index_t fold_factor = dim::unfolded;
+      if (op_d.fold_factor.defined()) {
+        std::optional<index_t> fold_factor_value = as_constant(op_d.fold_factor);
+        if (!fold_factor_value) {
+          constant_layout = false;
+          break;
+        }
+        fold_factor = *fold_factor_value;
+      }
+      std::optional<index_t> extent = as_constant(simplify(op_d.bounds.extent()));
+      if (!extent) {
+        constant_layout = false;
+        break;
+      }
+      layout_d.set_bounds(0, *extent - 1);
+      layout_d.set_stride(stride);
+      layout_d.set_fold_factor(fold_factor);
+    }
+
+    std::optional<std::size_t> size;
+    if (constant_layout) {
+      raw_buffer layout_buf;
+      layout_buf.base = nullptr;
+      layout_buf.elem_size = *elem_size;
+      layout_buf.rank = layout.size();
+      layout_buf.dims = layout.data();
+      size = layout_buf.init_strides(stride_alignment_);
+    }
+    if (size && *size <= static_cast<std::size_t>(std::numeric_limits<index_t>::max())) {
+      std::vector<dim_expr> dims;
+      dims.reserve(op->dims.size());
+      for (std::size_t d = 0; d < op->dims.size(); ++d) {
+        dims.push_back({op->dims[d].bounds, expr(layout[d].stride()), op->dims[d].fold_factor});
+      }
+      set_result(allocate::make(
+          op->sym, op->storage, op->elem_size, std::move(dims), static_cast<index_t>(*size), std::move(body)));
+    } else if (body.same_as(op->body)) {
+      set_result(op);
+    } else {
+      set_result(allocate::make(op->sym, op->storage, op->elem_size, op->dims, std::move(body)));
+    }
+  }
+};
+
+stmt fold_constant_allocation_layouts(const stmt& s, index_t stride_alignment) {
+  scoped_trace trace("fold_constant_allocation_layouts");
+  return allocation_layout_folder(stride_alignment).mutate(s);
+}
+
 stmt build_pipeline(node_context& ctx, const std::vector<buffer_expr_ptr>& inputs,
     const std::vector<buffer_expr_ptr>& outputs, std::vector<std::pair<var, expr>> lets, const build_options& options) {
   scoped_trace trace("build_pipeline");
@@ -1605,6 +1693,8 @@ stmt build_pipeline(node_context& ctx, const std::vector<buffer_expr_ptr>& input
   result = optimize_symbols(result, ctx);
 
   result = canonicalize_nodes(result);
+
+  result = fold_constant_allocation_layouts(result, options.stride_alignment);
 
   if (is_verbose()) {
     std::cout << result << std::endl;

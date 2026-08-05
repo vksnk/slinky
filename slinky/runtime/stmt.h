@@ -271,10 +271,17 @@ public:
   expr elem_size;
   std::vector<dim_expr> dims;
   stmt body;
+  // If non-negative, the total size in bytes of this allocation, computed at pipeline build time (see
+  // `fold_constant_allocation_layouts`). Only valid when every stride in `dims` is a constant expression, in which
+  // case `evaluate` can skip `init_strides` entirely. Mutations that change `elem_size` or `dims` must drop this back
+  // to -1 (rebuilding the node with the 5-argument `make` does so).
+  index_t constant_size = -1;
 
   void accept(stmt_visitor* v) const override;
 
   static stmt make(var sym, memory_type storage, expr elem_size, std::vector<dim_expr> dims, stmt body);
+  static stmt make(
+      var sym, memory_type storage, expr elem_size, std::vector<dim_expr> dims, index_t constant_size, stmt body);
 
   static constexpr stmt_node_type static_type = stmt_node_type::allocate;
 };

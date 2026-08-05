@@ -529,11 +529,17 @@ stmt loop::make(var sym, expr max_workers, interval_expr bounds, expr step, stmt
 }
 
 stmt allocate::make(var sym, memory_type storage, expr elem_size, std::vector<dim_expr> dims, stmt body) {
+  return make(sym, storage, std::move(elem_size), std::move(dims), /*constant_size=*/-1, std::move(body));
+}
+
+stmt allocate::make(
+    var sym, memory_type storage, expr elem_size, std::vector<dim_expr> dims, index_t constant_size, stmt body) {
   auto n = new allocate();
   n->sym = sym;
   n->storage = storage;
   n->elem_size = std::move(elem_size);
   n->dims = std::move(dims);
+  n->constant_size = constant_size;
   n->body = std::move(body);
   return stmt(n);
 }

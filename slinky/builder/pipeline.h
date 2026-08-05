@@ -365,6 +365,11 @@ struct build_options {
 
   // Generate trace_begin/trace_end calls to log the pipeline execution.
   bool trace = false;
+
+  // The stride alignment to assume when computing allocation layouts at build time. This should match the
+  // `stride_alignment` of the `eval_config` the pipeline will be evaluated with: allocations whose layout is folded
+  // at build time use this value instead of the evaluation-time configuration.
+  index_t stride_alignment = 1;
 };
 
 // Constructs a body and a pipeline object for a graph described by input and output buffers.

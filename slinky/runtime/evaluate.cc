@@ -638,13 +638,21 @@ inline index_t eval(const allocate* op, eval_context& ctx) {
   if (op->storage == memory_type::heap) {
     buffer.allocation = ctx.config->allocate(op->sym, &buffer);
   } else {
-    std::optional<std::size_t> size = buffer.init_strides(ctx.config->stride_alignment);
-    if (!size) {
-      return -1;
+    std::size_t size;
+    if (op->constant_size >= 0) {
+      // The layout was computed at pipeline build time: the strides in `dims` are constant expressions (already
+      // evaluated into `buffer` above), and this is the size `init_strides` would compute.
+      size = static_cast<std::size_t>(op->constant_size);
+    } else {
+      std::optional<std::size_t> size_opt = buffer.init_strides(ctx.config->stride_alignment);
+      if (!size_opt) {
+        return -1;
+      }
+      size = *size_opt;
     }
-    if (op->storage == memory_type::stack || *size <= ctx.config->auto_stack_threshold) {
+    if (op->storage == memory_type::stack || size <= ctx.config->auto_stack_threshold) {
       std::size_t alignment = ctx.config->base_alignment;
-      buffer.base = SLINKY_ALLOCA(char, *size + alignment - 1);
+      buffer.base = SLINKY_ALLOCA(char, size + alignment - 1);
       buffer.base = align_up(buffer.base, alignment);
       buffer.allocation = nullptr;
       return eval_with_value(op->body, op->sym, reinterpret_cast<index_t>(&buffer), ctx);
