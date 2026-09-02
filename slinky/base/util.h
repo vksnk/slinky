@@ -1,6 +1,7 @@
 #ifndef SLINKY_BASE_UTIL_H
 #define SLINKY_BASE_UTIL_H
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
@@ -16,8 +17,11 @@ inline void* allocate_bytes(std::size_t size, std::size_t alignment) {
 #ifdef _MSC_VER
   return _aligned_malloc(size, alignment);
 #else
-  // `std::aligned_alloc` requires the size to be a multiple of the alignment.
-  return std::aligned_alloc(alignment, (size + alignment - 1) & ~(alignment - 1));
+  // `posix_memalign` rather than `std::aligned_alloc`, which is only available on Android from API level 28. It
+  // requires the alignment to be a multiple of sizeof(void*).
+  void* result = nullptr;
+  if (posix_memalign(&result, std::max(alignment, sizeof(void*)), size) != 0) return nullptr;
+  return result;
 #endif
 }
 
